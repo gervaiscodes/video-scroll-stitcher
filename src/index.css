@@ -121,3 +121,17 @@ canvas {
 .hidden {
   display: none;
 }
+
+.github-link {
+  position: absolute;
+  top: 1.5rem;
+  right: 1.5rem;
+  color: var(--text-muted);
+  transition: color 0.25s ease;
+  opacity: 0.8;
+}
+
+.github-link:hover {
+  color: var(--primary);
+  opacity: 1;
+}
