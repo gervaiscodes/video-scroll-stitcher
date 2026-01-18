@@ -217,7 +217,8 @@ function getFrameData(
 }
 
 // Simple pixel row matching
-function findOffset(
+// Export findOffset so it can be used by detectStaticRegions
+export function findOffset(
   prev: ImageData,
   curr: ImageData,
   w: number,
@@ -301,88 +302,142 @@ export async function detectStaticRegions(
   const video = document.createElement("video");
   video.src = videoUrl;
   video.muted = true;
-  video.playsInline = true;
 
-  await new Promise<void>((resolve) => {
-    video.onloadedmetadata = () => resolve();
-  });
+  await video.play();
+  video.pause();
 
-  const width = video.videoWidth;
-  const height = video.videoHeight;
-  const duration = video.duration;
+  // Logic:
+  // 1. Sample pairs of frames (t, t + 0.2s)
+  // 2. Calculate global scroll (dy) between them using center of screen
+  // 3. For each row:
+  //    - Calc diff if STATIC (row y matches row y)
+  //    - Calc diff if MOVING (row y match row y - dy)
+  // 4. If StaticDiff < MovingDiff, vote "Static"
 
-  // Sample frames
-  const sampleCount = 5;
-  const frames: ImageData[] = [];
+  const duration = video.duration || 5;
   const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const ctx = canvas.getContext("2d");
 
   if (!ctx) return { top: 0, bottom: 0 };
 
-  for (let i = 0; i < sampleCount; i++) {
-    // Sample from 10% to 90% of video to avoid fade-ins/outs
-    const time = duration * 0.1 + (duration * 0.8 * i) / (sampleCount - 1);
-    video.currentTime = time;
-    await new Promise<void>((r) => {
-      video.onseeked = () => r();
-    });
+  const w = video.videoWidth;
+  const h = video.videoHeight;
+  canvas.width = w;
+  canvas.height = h;
+
+  const votesStatic = new Uint16Array(h).fill(0);
+  const votesTotal = new Uint16Array(h).fill(0);
+
+  const samples = 6;
+  const step = Math.min(duration / (samples + 1), 1.0);
+
+  for (let i = 0; i < samples; i++) {
+    const t1 = (i + 1) * step;
+    const t2 = t1 + 0.2; // 200ms jump
+    if (t2 > duration) break;
+
+    // Frame 1
+    video.currentTime = t1;
+    await new Promise((r) => (video.onseeked = r));
     ctx.drawImage(video, 0, 0);
-    frames.push(ctx.getImageData(0, 0, width, height));
-  }
+    const frame1 = ctx.getImageData(0, 0, w, h);
 
-  // Analyze rows
-  // We compute the max difference for each row across all frames
-  const rowDiffs = new Float32Array(height);
+    // Frame 2
+    video.currentTime = t2;
+    await new Promise((r) => (video.onseeked = r));
+    ctx.drawImage(video, 0, 0);
+    const frame2 = ctx.getImageData(0, 0, w, h);
 
-  // Check center column and maybe 2 others
-  const cols = [
-    Math.floor(width * 0.25),
-    Math.floor(width * 0.5),
-    Math.floor(width * 0.75),
-  ];
+    // Calculate global scroll using safe center area (ignore potential headers/footers)
+    // UPDATED: Large video headers can take 60%+. Let's check the BOTTOM 30% only (70%-85%).
+    // This is aggressive but ensures we hit the list and not the static player.
+    const safeTop = Math.floor(h * 0.7);
+    const safeBottom = Math.floor(h * 0.15);
+    // cropTop=70%, cropBottom=15% => Window = 15% height.
+    const dy = findOffset(frame1, frame2, w, h, safeTop, safeBottom);
 
-  for (let y = 0; y < height; y++) {
-    let maxRowDiff = 0;
+    if (dy <= 0) continue; // No scroll detected, can't distinguish
 
-    for (let i = 0; i < sampleCount - 1; i++) {
-      let diff = 0;
-      for (const x of cols) {
-        const idx = (y * width + x) * 4;
-        const f1 = frames[i].data;
-        const f2 = frames[i + 1].data;
+    // Analyze rows
+    // We only check rows that exist in both frames after accounting for dy
+    // Frame1[y] corresponds to Frame2[y - dy] if scrolling
 
-        diff +=
-          Math.abs(f1[idx] - f2[idx]) +
-          Math.abs(f1[idx + 1] - f2[idx + 1]) +
-          Math.abs(f1[idx + 2] - f2[idx + 2]);
+    const data1 = frame1.data;
+    const data2 = frame2.data;
+
+    for (let y = 0; y < h; y++) {
+      // Compare Static: Row y vs Row y
+      let diffStatic = 0;
+      for (let x = 0; x < w; x += 10) {
+        // sparse sample
+        const idx = (y * w + x) * 4;
+        diffStatic +=
+          Math.abs(data1[idx] - data2[idx]) +
+          Math.abs(data1[idx + 1] - data2[idx + 1]) +
+          Math.abs(data1[idx + 2] - data2[idx + 2]);
       }
-      // Normalize by number of cols check
-      diff /= cols.length;
-      if (diff > maxRowDiff) maxRowDiff = diff;
+
+      // Compare Moving: Row y (Frame 1) vs Row y - dy (Frame 2)
+      // The content at 'y' in Frame 1 moves UP to 'y - dy' in Frame 2.
+      let diffMoving = 0;
+      const targetY = y - dy;
+
+      if (targetY >= 0 && targetY < h) {
+        for (let x = 0; x < w; x += 10) {
+          const idx1 = (y * w + x) * 4;
+          const idx2 = (targetY * w + x) * 4;
+          diffMoving +=
+            Math.abs(data1[idx1] - data2[idx2]) +
+            Math.abs(data1[idx1 + 1] - data2[idx2 + 1]) +
+            Math.abs(data1[idx1 + 2] - data2[idx2 + 2]);
+        }
+      } else {
+        // If the content moved off screen, we can't compare motion.
+        // Treat as neutral or skip?
+        // For header (top), y is small, dy > 0. y - dy likely negative.
+        // E.g. y=100, dy=200 -> target=-100.
+        // This means the content at y=100 is GONE.
+        // So we can only look at 'Static' error.
+        // If static error is low-ish, it stays?
+        // Actually, if content scrolled off, and we still see something at Y, it MUST be static (or new content that looks identical).
+        diffMoving = Infinity;
+      }
+
+      votesTotal[y]++;
+
+      // If it matches itself better than it matches the scrolled position
+      // (Or if the scrolled position is off-screen)
+      if (diffStatic < diffMoving * 0.8) {
+        // 20% bias towards motion
+        votesStatic[y]++;
+      }
     }
-    rowDiffs[y] = maxRowDiff;
   }
 
-  // Determine thresholds
-  // A static row should have very close to 0 difference. Compression artifacts might add noise.
-  const noiseThreshold = 15;
-
+  // Determine Cutoffs
   let top = 0;
-  for (let y = 0; y < height / 2; y++) {
-    if (rowDiffs[y] > noiseThreshold) {
-      break;
+  let bottom = 0;
+  const threshold = 0.7; // 70% of votes must be static
+
+  // Scan Top Down
+  for (let y = 0; y < h / 3; y++) {
+    if (votesTotal[y] > 0 && votesStatic[y] / votesTotal[y] > threshold) {
+      top = y;
+    } else {
+      // Gap allowance?
+      // If we hit a non-static row, stop?
+      // Headers are continuous.
+      if (y > 50) break; // Give it some buffer, but stop if we hit content
     }
-    top = y + 1;
   }
 
-  let bottom = 0;
-  for (let y = height - 1; y > height / 2; y--) {
-    if (rowDiffs[y] > noiseThreshold) {
-      break;
+  // Scan Bottom Up
+  for (let y = h - 1; y > h * 0.6; y--) {
+    if (votesTotal[y] > 0 && votesStatic[y] / votesTotal[y] > threshold) {
+      bottom = h - y;
+    } else {
+      if (h - y > 50) break;
     }
-    bottom = height - y;
   }
 
   return { top, bottom };

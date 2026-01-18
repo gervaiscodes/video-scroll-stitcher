@@ -84,7 +84,7 @@ function App() {
 
   return (
     <>
-      <h1>Scroll Stitcher</h1>
+      <h1>Video Scroll Stitcher</h1>
       <p style={{ color: "var(--text-muted)", marginBottom: "2rem" }}>
         Turn your screen recordings into long screenshots instantly.
       </p>
