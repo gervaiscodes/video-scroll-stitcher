@@ -2,7 +2,7 @@
 
 Turn your screen recordings into long, seamless screenshots instantly.
 
-**Snitch** is a client-side web application that takes a video of you scrolling through content (like a Twitter feed, a long article, or a chat history) and stitches the frames together into a single, high-quality long screenshot.
+**Video Scroll Stitcher** is a client-side web application that takes a video of you scrolling through content (like a Twitter feed, a long article, or a chat history) and stitches the frames together into a single, high-quality long screenshot.
 
 ## 🚀 Features
 
@@ -50,7 +50,7 @@ Navigate to `http://localhost:5173` (or the URL shown in your terminal).
 
 ### 2. Import Video
 
-* Drag and drop your screen recording file into the Snitch app.
+* Drag and drop your screen recording file into the app.
 * Or click "Select File" to browse.
 
 ### 3. Adjust Settings
